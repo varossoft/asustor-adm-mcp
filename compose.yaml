@@ -25,7 +25,7 @@ services:
 
   mcp-nas:
     build: .
-    image: mcp-nas:0.2.1
+    image: mcp-nas:0.3.0
     container_name: mcp-nas
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-100}"

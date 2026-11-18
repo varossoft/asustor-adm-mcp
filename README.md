@@ -8,12 +8,14 @@ Tested on an AS5402T running ADM 5.1.4. Built for ADM: it does not use `lsblk`, 
 
 | Tool | What it returns |
 |---|---|
-| `get_system_overview` | Model and ADM version, kernel, CPU, load, uptime, RAM and swap |
-| `get_disks` | Physical disks (`sdX`, `nvmeXnY`): model, **serial** (NVMe and SATA), type, size and **temperature** (hwmon, if the kernel exposes it) |
-| `get_storage_usage` | Usage of the paths configured in `STORAGE_PATHS` |
+| `get_system_info` | Model and ADM version, kernel, CPU, load, uptime, RAM and swap |
+| `list_disks` | Physical disks (`sdX`, `nvmeXnY`): model, **serial** (NVMe and SATA), type, size, **temperature** (hwmon, if the kernel exposes it), **mount points** of their partitions and the **md arrays** they belong to |
+| `get_storage_usage` | Usage of the paths configured in `STORAGE_PATHS`, with the backing device and file system |
 | `get_raid_status` | Arrays from `/proc/mdstat`, missing members, rebuild progress and an alert on watched arrays |
-| `list_files`, `search_files` | Names and metadata inside `FILE_ROOTS` (name search with result and time limits). **Never reads file contents.** |
-| `docker_ps`, `docker_projects`, `docker_inspect`, `docker_logs`, `docker_images`, `docker_networks` | Docker state. `inspect` returns only the *names* of environment variables; `logs` masks typical secret patterns |
+| `list_directory`, `search_files` | Names and metadata inside `FILE_ROOTS` (name search with result and time limits). **Never reads file contents.** |
+| `list_containers`, `list_compose_projects`, `inspect_container`, `get_container_logs`, `list_images`, `list_networks` | Docker state. `inspect_container` returns only the *names* of environment variables; `get_container_logs` masks typical secret patterns |
+
+Naming convention: `list_*` for collections, `get_*` for a single report, `inspect_*` for one object, `search_*` for searches.
 
 ## Giving the assistant context
 
@@ -62,7 +64,7 @@ claude mcp add --transport http nas http://<NAS-IP>:8088/mcp --header "Authoriza
 | `MCP_BIND_IP` | `127.0.0.1` | Host IP on which port 8088 is published (LAN or Tailscale). Do not use `0.0.0.0` |
 | `MD_WATCH` | `md1` | Arrays that raise an alert when degraded. On ADM, `md0` and other system mirrors always show missing members (`[4/1]`) and should not be watched |
 | `HIDDEN_NAMES` | `#Recycle,@eaDir,@tmp` | Hidden folders |
-| `MAX_LOG_CHARS` | `16000` | Character limit returned by `docker_logs` |
+| `MAX_LOG_CHARS` | `16000` | Character limit returned by `get_container_logs` |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8088` | Server listen address |
 
 ## Development
@@ -74,6 +76,13 @@ pytest
 ```
 
 The tests include real `/proc/mdstat` output from a degraded RAID1 volume.
+
+## Changelog
+
+### 0.3.0
+- **Breaking:** tools renamed to a consistent `verb_noun` scheme: `get_system_overview` → `get_system_info`, `get_disks` → `list_disks`, `list_files` → `list_directory`, `docker_ps` → `list_containers`, `docker_projects` → `list_compose_projects`, `docker_inspect` → `inspect_container`, `docker_logs` → `get_container_logs`, `docker_images` → `list_images`, `docker_networks` → `list_networks`. The server name is now `asustor-adm-mcp`.
+- `list_disks` reports the mount points and md arrays of each disk, read from `/proc/mounts` and `/proc/mdstat`, so the assistant no longer depends on `NAS_NOTES` for that.
+- `get_storage_usage` reports the backing `device` and `fstype`.
 
 ## Roadmap
 

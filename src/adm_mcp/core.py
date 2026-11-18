@@ -20,6 +20,8 @@ import httpx
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DISK_RE = re.compile(r"^(sd[a-z]+|nvme\d+n\d+)$")
+# Block device (disk, partition or md array) -> its base device: sda1 -> sda, nvme0n1p4 -> nvme0n1.
+BASE_DEV_RE = re.compile(r"^(sd[a-z]+|nvme\d+n\d+|md\d+)(?:p?\d+)?$")
 SECRET_RE = re.compile(
     r"(?i)\b([\w.-]*(?:token|passw(?:or)?d|secret|api[_-]?key|authorization)"
     r"[\w.-]*\s*[=:]\s*)(?:Bearer\s+)?\S+"
@@ -106,7 +108,7 @@ def redact(text: str) -> str:
 # --------------------------------------------------------------------------
 # System
 # --------------------------------------------------------------------------
-def get_system_overview() -> dict:
+def get_system_info() -> dict:
     conf: dict[str, str] = {}
     for line in read_text(cfg.nas_conf).splitlines():
         m = re.match(r"^\s*(Model|Version)\s*=\s*(.+?)\s*$", line)
@@ -150,6 +152,49 @@ def get_system_overview() -> dict:
     }
 
 
+PROC_MOUNTS = "/proc/mounts"
+
+
+def base_device(name: str) -> str | None:
+    """sda1 -> sda, nvme0n1p4 -> nvme0n1, md1 -> md1 (None if not a known device)."""
+    m = BASE_DEV_RE.match(name or "")
+    return m.group(1) if m else None
+
+
+def _unescape_mount(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), value)
+
+
+def parse_mounts(text: str) -> list[dict]:
+    """Parse /proc/mounts. `device` is the name under /dev (sda1, md1...) or None."""
+    out = []
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) < 3:
+            continue
+        source = _unescape_mount(f[0])
+        out.append(
+            {
+                "device": source[len("/dev/"):] if source.startswith("/dev/") else None,
+                "mountpoint": _unescape_mount(f[1]),
+                "fstype": f[2],
+            }
+        )
+    return out
+
+
+def find_mount(path: str, mounts: list[dict]) -> dict | None:
+    """The mount that contains `path` (longest matching mountpoint)."""
+    real = os.path.realpath(path)
+    best = None
+    for m in mounts:
+        mp = m["mountpoint"]
+        if real == mp or real.startswith(mp.rstrip("/") + "/"):
+            if best is None or len(mp) > len(best["mountpoint"]):
+                best = m
+    return best
+
+
 SYS_BLOCK = "/sys/block"
 
 
@@ -188,9 +233,23 @@ def _disk_temps(base: str) -> dict:
     return {}
 
 
-def get_disks() -> list[dict]:
-    """Physical disks from /sys/block. Includes the serial: device names change
-    when disks are removed or added, the serial does not."""
+def _raid_membership() -> dict[str, list[str]]:
+    """Base disk -> names of the md arrays that use one of its partitions."""
+    out: dict[str, list[str]] = {}
+    for a in parse_mdstat(read_text("/proc/mdstat"), set())["arrays"]:
+        for member in a["members"]:
+            disk = base_device(member)
+            if disk and a["name"] not in out.setdefault(disk, []):
+                out[disk].append(a["name"])
+    return out
+
+
+def list_disks() -> list[dict]:
+    """Physical disks from /sys/block. Includes the serial (device names change
+    when disks are removed or added, the serial does not), the mount points of
+    its partitions and the md arrays it belongs to, both read from the kernel."""
+    mounts = parse_mounts(read_text(PROC_MOUNTS))
+    raid = _raid_membership()
     disks = []
     try:
         names = sorted(os.listdir(SYS_BLOCK))
@@ -214,6 +273,10 @@ def get_disks() -> list[dict]:
                 "serial": _disk_serial(base),
                 "size": human(size),
                 "size_bytes": size,
+                "mounts": sorted(
+                    m["mountpoint"] for m in mounts if m["device"] and base_device(m["device"]) == name
+                ),
+                "raid_arrays": sorted(raid.get(name, [])),
                 **_disk_temps(base),
             }
         )
@@ -221,7 +284,9 @@ def get_disks() -> list[dict]:
 
 
 def get_storage_usage() -> list[dict]:
+    """Space per configured path, with the device and file system backing it."""
     out = []
+    mounts = parse_mounts(read_text(PROC_MOUNTS))
     for label, path in cfg.storage_paths.items():
         try:
             st = os.statvfs(path)
@@ -231,9 +296,12 @@ def get_storage_usage() -> list[dict]:
         total = st.f_blocks * st.f_frsize
         free = st.f_bavail * st.f_frsize
         used = total - st.f_bfree * st.f_frsize
+        mount = find_mount(path, mounts) or {}
         out.append(
             {
                 "name": label,
+                "device": mount.get("device"),
+                "fstype": mount.get("fstype"),
                 "total": human(total),
                 "used": human(used),
                 "free": human(free),
@@ -302,7 +370,7 @@ def _hidden(name: str) -> bool:
     return name in cfg.hidden_names or name[:1] in (".", "@", "#")
 
 
-def list_files(path: str = "", limit: int = 200) -> dict:
+def list_directory(path: str = "", limit: int = 200) -> dict:
     limit = max(1, min(limit, 1000))
     if not path:
         return {"roots": _roots()}
@@ -405,7 +473,7 @@ def _ports(ports: list[dict]) -> list[str]:
     return sorted(set(out))
 
 
-def docker_ps(all: bool = True) -> list[dict]:
+def list_containers(all: bool = True) -> list[dict]:
     items = _get("/containers/json", all=1 if all else 0).json()
     return [
         {
@@ -420,9 +488,9 @@ def docker_ps(all: bool = True) -> list[dict]:
     ]
 
 
-def docker_projects() -> list[dict]:
+def list_compose_projects() -> list[dict]:
     projects: dict[str, dict] = {}
-    for c in docker_ps(all=True):
+    for c in list_containers(all=True):
         name = c["project"] or "(no compose project)"
         p = projects.setdefault(name, {"project": name, "running": 0, "total": 0})
         p["total"] += 1
@@ -430,7 +498,7 @@ def docker_projects() -> list[dict]:
     return sorted(projects.values(), key=lambda p: p["project"])
 
 
-def docker_inspect(name: str) -> dict:
+def inspect_container(name: str) -> dict:
     d = _get(f"/containers/{check_name(name)}/json").json()
     st, cfg_ = d.get("State", {}), d.get("Config", {})
     return {
@@ -466,7 +534,7 @@ def demux_docker_logs(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def docker_logs(name: str, lines: int = 100) -> dict:
+def get_container_logs(name: str, lines: int = 100) -> dict:
     lines = max(1, min(lines, 1000))
     r = _get(
         f"/containers/{check_name(name)}/logs",
@@ -481,7 +549,7 @@ def docker_logs(name: str, lines: int = 100) -> dict:
     }
 
 
-def docker_images() -> list[dict]:
+def list_images() -> list[dict]:
     items = _get("/images/json").json()
     return [
         {"tags": i.get("RepoTags") or ["<none>"], "size": human(i.get("Size", 0))}
@@ -489,7 +557,7 @@ def docker_images() -> list[dict]:
     ]
 
 
-def docker_networks() -> list[dict]:
+def list_networks() -> list[dict]:
     items = _get("/networks").json()
     return [
         {

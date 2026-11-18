@@ -70,7 +70,7 @@ def test_safe_path_blocks_traversal_and_symlink_escape(tmp_path):
 
 
 def test_list_files_hides_recycle(tmp_path):
-    r = core.list_files(str(tmp_path / "data"))
+    r = core.list_directory(str(tmp_path / "data"))
     names = {e["name"] for e in r["entries"]}
     assert "docs" in names and "#Recycle" not in names
 
@@ -132,9 +132,9 @@ def test_docker_ps_and_projects():
          "Labels": {"com.docker.compose.project": "servarr"}},
     ]
     _mock_docker(lambda req: httpx.Response(200, json=containers))
-    ps = core.docker_ps()
+    ps = core.list_containers()
     assert [c["name"] for c in ps] == ["radarr", "sonarr"]
-    assert core.docker_projects() == [{"project": "servarr", "running": 1, "total": 2}]
+    assert core.list_compose_projects() == [{"project": "servarr", "running": 1, "total": 2}]
 
 
 def test_docker_inspect_hides_env_values():
@@ -142,7 +142,7 @@ def test_docker_inspect_hides_env_values():
             "State": {"Status": "running"}, "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
             "NetworkSettings": {"Networks": {"proxy": {}}}, "Mounts": []}
     _mock_docker(lambda req: httpx.Response(200, json=body))
-    r = core.docker_inspect("n8n")
+    r = core.inspect_container("n8n")
     assert r["env_names"] == ["DB_PASSWORD", "TZ"]
     assert "supersecret" not in json.dumps(r)
 
@@ -151,24 +151,24 @@ def test_docker_logs_redacts_and_truncates():
     payload = _frame(1, b"token=abc123 startup\n" + b"x" * 100)
     _mock_docker(lambda req: httpx.Response(200, content=payload))
     core.cfg.max_log_chars = 50
-    r = core.docker_logs("n8n", lines=10)
+    r = core.get_container_logs("n8n", lines=10)
     assert r["truncated"] and len(r["logs"]) == 50
     core.cfg.max_log_chars = 16000
-    r = core.docker_logs("n8n", lines=10)
+    r = core.get_container_logs("n8n", lines=10)
     assert "abc123" not in r["logs"]
 
 
 def test_docker_proxy_403_message():
     _mock_docker(lambda req: httpx.Response(403))
     with pytest.raises(RuntimeError, match="rejects"):
-        core.docker_images()
+        core.list_images()
 
 
 def test_system_overview_parses_nas_conf(tmp_path):
     conf = tmp_path / "nas.conf"
     conf.write_text("[General]\nModel = AS5402T\nVersion = 5.1.4.RM62\nLastversion = 5.1.3\nModelName = AS5402T\n")
     core.cfg.nas_conf = str(conf)
-    r = core.get_system_overview()
+    r = core.get_system_info()
     assert r["model"] == "AS5402T" and r["adm_version"] == "5.1.4.RM62"
 
 
@@ -201,7 +201,7 @@ def _fake_sysfs(tmp_path):
 
 def test_get_disks_serial_and_temperature(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "SYS_BLOCK", str(_fake_sysfs(tmp_path)))
-    disks = {d["device"]: d for d in core.get_disks()}
+    disks = {d["device"]: d for d in core.list_disks()}
     assert set(disks) == {"nvme0n1", "sda"}
     assert disks["nvme0n1"]["serial"] == "NVME-SERIAL-1"
     assert disks["nvme0n1"]["temp_c"] == 39.9 and disks["nvme0n1"]["temp_crit_c"] == 89.9
@@ -220,3 +220,56 @@ def test_md_labels():
     by = {a["name"]: a for a in r["arrays"]}
     assert by["md1"]["label"] == "volume1" and by["md0"]["label"] == "system"
     assert "label" not in by["md126"]
+
+
+MOUNTS = """/dev/md0 / ext4 rw 0 0
+/dev/sda1 /archive1 ext4 ro,relatime 0 0
+/dev/sdb1 /archive2 ext4 ro,relatime 0 0
+/dev/md1 /mnt/volume1 btrfs ro,relatime 0 0
+tmpfs /tmp tmpfs rw 0 0
+/dev/sdc1 /with\\040space ext4 ro 0 0
+"""
+
+
+def test_base_device():
+    assert core.base_device("sda1") == "sda"
+    assert core.base_device("nvme0n1p4") == "nvme0n1"
+    assert core.base_device("md126") == "md126"
+    assert core.base_device("loop0") is None
+
+
+def test_parse_mounts_and_find_mount():
+    mounts = core.parse_mounts(MOUNTS)
+    by = {m["mountpoint"]: m for m in mounts}
+    assert by["/archive1"]["device"] == "sda1" and by["/archive1"]["fstype"] == "ext4"
+    assert by["/tmp"]["device"] is None
+    assert "/with space" in by
+    assert core.find_mount("/archive2/Media/x", mounts)["device"] == "sdb1"
+    assert core.find_mount("/mnt/volume1", mounts)["device"] == "md1"
+    assert core.find_mount("/nowhere", mounts)["mountpoint"] == "/"
+
+
+def test_list_disks_mounts_and_raid_membership(tmp_path, monkeypatch):
+    root = _fake_sysfs(tmp_path)
+    mounts = tmp_path / "mounts"
+    mounts.write_text("/dev/sda1 /archive1 ext4 ro 0 0\n/dev/md1 /mnt/volume1 btrfs ro 0 0\n")
+    monkeypatch.setattr(core, "SYS_BLOCK", str(root))
+    monkeypatch.setattr(core, "PROC_MOUNTS", str(mounts))
+    monkeypatch.setattr(
+        core, "read_text",
+        lambda path, _orig=core.read_text: MDSTAT_DEGRADED if path == "/proc/mdstat" else _orig(path),
+    )
+    disks = {d["device"]: d for d in core.list_disks()}
+    assert disks["sda"]["mounts"] == ["/archive1"]
+    assert disks["sda"]["raid_arrays"] == []
+    assert disks["nvme0n1"]["mounts"] == []
+    assert disks["nvme0n1"]["raid_arrays"] == ["md0", "md1", "md126"]
+
+
+def test_storage_usage_reports_device_and_fstype(tmp_path, monkeypatch):
+    mounts = tmp_path / "mounts"
+    mounts.write_text(f"/dev/sda1 {tmp_path} ext4 ro 0 0\n")
+    monkeypatch.setattr(core, "PROC_MOUNTS", str(mounts))
+    core.cfg.storage_paths = {"archive1": str(tmp_path)}
+    r = core.get_storage_usage()[0]
+    assert r["device"] == "sda1" and r["fstype"] == "ext4"

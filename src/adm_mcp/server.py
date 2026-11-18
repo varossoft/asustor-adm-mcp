@@ -12,23 +12,23 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from . import core
 
-log = logging.getLogger("adm-mcp")
+log = logging.getLogger("asustor-adm-mcp")
 
 READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
 
 TOOLS = [
-    core.get_system_overview,
-    core.get_disks,
+    core.get_system_info,
+    core.list_disks,
     core.get_storage_usage,
     core.get_raid_status,
-    core.list_files,
+    core.list_directory,
     core.search_files,
-    core.docker_ps,
-    core.docker_projects,
-    core.docker_inspect,
-    core.docker_logs,
-    core.docker_images,
-    core.docker_networks,
+    core.list_containers,
+    core.list_compose_projects,
+    core.inspect_container,
+    core.get_container_logs,
+    core.list_images,
+    core.list_networks,
 ]
 
 
@@ -69,7 +69,7 @@ def build_instructions(notes: str = "") -> str:
 
 
 def build_mcp(notes: str = "") -> FastMCP:
-    mcp = FastMCP("adm-mcp", instructions=build_instructions(notes))
+    mcp = FastMCP("asustor-adm-mcp", instructions=build_instructions(notes))
     for fn in TOOLS:
         mcp.tool(annotations=READ_ONLY)(fn)
 
