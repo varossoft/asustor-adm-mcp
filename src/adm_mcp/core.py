@@ -1,8 +1,8 @@
-"""Lógica de solo lectura para un NAS Asustor (ADM).
+"""Read-only logic for an Asustor NAS (ADM).
 
-Sin dependencias de MCP: son funciones puras que leen /proc, /sys, el
-sistema de archivos (confinado a raíces permitidas) y la API de Docker a
-través de un docker-socket-proxy. Nada escribe ni ejecuta acciones.
+No MCP dependencies: plain functions that read /proc, /sys, the file
+system (confined to allowed roots) and the Docker API through a
+docker-socket-proxy. Nothing writes or performs actions.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ SECRET_RE = re.compile(
 
 
 # --------------------------------------------------------------------------
-# Configuración (variables de entorno)
+# Configuration (environment variables)
 # --------------------------------------------------------------------------
 def _csv(name: str, default: str = "") -> list[str]:
     return [x.strip() for x in os.getenv(name, default).split(",") if x.strip()]
@@ -69,12 +69,12 @@ class Config:
 
 cfg = Config.from_env()
 
-# Inyectable en tests (httpx.MockTransport).
+# Injectable in tests (httpx.MockTransport).
 _transport: httpx.BaseTransport | None = None
 
 
 # --------------------------------------------------------------------------
-# Utilidades
+# Utilities
 # --------------------------------------------------------------------------
 def read_text(path: str) -> str:
     try:
@@ -95,7 +95,7 @@ def human(n: int | float) -> str:
 
 def check_name(name: str) -> str:
     if not NAME_RE.match(name or ""):
-        raise ValueError("Nombre no válido (solo letras, números, _ . -)")
+        raise ValueError("Invalid name (only letters, digits, _ . -)")
     return name
 
 
@@ -104,7 +104,7 @@ def redact(text: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Sistema
+# System
 # --------------------------------------------------------------------------
 def get_system_overview() -> dict:
     conf: dict[str, str] = {}
@@ -154,8 +154,8 @@ SYS_BLOCK = "/sys/block"
 
 
 def _disk_serial(base: str) -> str | None:
-    """Serie del disco. NVMe la expone en device/serial; los SATA, en la
-    página VPD 0x80 (4 bytes de cabecera + serie ASCII)."""
+    """Disk serial number. NVMe exposes it in device/serial; SATA drives, in
+    VPD page 0x80 (4-byte header + ASCII serial)."""
     serial = read_text(f"{base}/device/serial").strip()
     if serial:
         return serial
@@ -172,7 +172,7 @@ def _disk_serial(base: str) -> str | None:
 
 
 def _disk_temps(base: str) -> dict:
-    """Temperatura desde hwmon (NVMe y SATA con drivetemp), sin privilegios."""
+    """Temperature from hwmon (NVMe and SATA with drivetemp), unprivileged."""
     for hw in sorted(glob.glob(f"{base}/device/hwmon*")):
         try:
             cur = int(read_text(f"{hw}/temp1_input").strip()) / 1000
@@ -189,8 +189,8 @@ def _disk_temps(base: str) -> dict:
 
 
 def get_disks() -> list[dict]:
-    """Discos físicos desde /sys/block. Incluye serie: los nombres cambian
-    al quitar o añadir discos, la serie no."""
+    """Physical disks from /sys/block. Includes the serial: device names change
+    when disks are removed or added, the serial does not."""
     disks = []
     try:
         names = sorted(os.listdir(SYS_BLOCK))
@@ -282,7 +282,7 @@ def get_raid_status() -> dict:
 
 
 # --------------------------------------------------------------------------
-# Archivos (solo lectura, confinados a FILE_ROOTS)
+# Files (read-only, confined to FILE_ROOTS)
 # --------------------------------------------------------------------------
 def _roots() -> list[str]:
     return [os.path.realpath(r) for r in cfg.file_roots if os.path.isdir(r)]
@@ -290,12 +290,12 @@ def _roots() -> list[str]:
 
 def safe_path(path: str) -> str:
     if not path or not path.startswith("/"):
-        raise ValueError("La ruta debe ser absoluta")
+        raise ValueError("Path must be absolute")
     real = os.path.realpath(path)
     for root in _roots():
         if real == root or real.startswith(root + os.sep):
             return real
-    raise ValueError("Ruta fuera de las raíces permitidas")
+    raise ValueError("Path outside the allowed roots")
 
 
 def _hidden(name: str) -> bool:
@@ -335,15 +335,15 @@ def list_files(path: str = "", limit: int = 200) -> dict:
 
 
 def search_files(query: str, path: str = "", limit: int = 50, timeout: int = 20) -> dict:
-    """Búsqueda por nombre (subcadena, sin distinguir mayúsculas). Con límite
-    de resultados y de tiempo para no machacar los discos."""
+    """Name search (substring, case-insensitive). Limited in results and time
+    so the disks are not hammered."""
     if not query or len(query) > 100 or "\x00" in query:
-        raise ValueError("Consulta no válida (1-100 caracteres)")
+        raise ValueError("Invalid query (1-100 characters)")
     limit = max(1, min(limit, 200))
     timeout = max(1, min(timeout, 60))
     bases = [safe_path(path)] if path else _roots()
     if not bases:
-        raise ValueError("No hay raíces configuradas (FILE_ROOTS)")
+        raise ValueError("No roots configured (FILE_ROOTS)")
 
     pattern = "*" + re.sub(r"([\\*?\[\]])", r"\\\1", query) + "*"
     prune: list[str] = []
@@ -381,18 +381,18 @@ def search_files(query: str, path: str = "", limit: int = 50, timeout: int = 20)
 
 
 # --------------------------------------------------------------------------
-# Docker (API de Engine a través de docker-socket-proxy, solo GET)
+# Docker (Engine API through docker-socket-proxy, GET only)
 # --------------------------------------------------------------------------
 def _get(endpoint: str, **params):
     try:
         with httpx.Client(base_url=cfg.docker_host, timeout=15, transport=_transport) as c:
             r = c.get(endpoint, params=params or None)
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"No se pudo contactar con Docker ({cfg.docker_host}): {exc}") from exc
+        raise RuntimeError(f"Could not reach Docker ({cfg.docker_host}): {exc}") from exc
     if r.status_code == 403:
-        raise RuntimeError("El docker-socket-proxy rechaza este endpoint (403)")
+        raise RuntimeError("The docker-socket-proxy rejects this endpoint (403)")
     if r.status_code == 404:
-        raise RuntimeError("No encontrado")
+        raise RuntimeError("Not found")
     r.raise_for_status()
     return r
 
@@ -423,7 +423,7 @@ def docker_ps(all: bool = True) -> list[dict]:
 def docker_projects() -> list[dict]:
     projects: dict[str, dict] = {}
     for c in docker_ps(all=True):
-        name = c["project"] or "(sin proyecto compose)"
+        name = c["project"] or "(no compose project)"
         p = projects.setdefault(name, {"project": name, "running": 0, "total": 0})
         p["total"] += 1
         p["running"] += 1 if c["state"] == "running" else 0
@@ -449,13 +449,13 @@ def docker_inspect(name: str) -> dict:
             {"src": m.get("Source"), "dst": m.get("Destination"), "rw": m.get("RW")}
             for m in d.get("Mounts", [])
         ],
-        # Solo los NOMBRES de las variables: los valores pueden ser secretos.
+        # Only the variable NAMES: the values may be secrets.
         "env_names": sorted(e.split("=", 1)[0] for e in (cfg_.get("Env") or [])),
     }
 
 
 def demux_docker_logs(data: bytes) -> str:
-    """Los logs de contenedores sin TTY vienen en tramas de 8 bytes de cabecera."""
+    """Logs from containers without a TTY come in frames with an 8-byte header."""
     if len(data) >= 8 and data[0] in (0, 1, 2) and data[1:4] == b"\x00\x00\x00":
         chunks, i = [], 0
         while i + 8 <= len(data):

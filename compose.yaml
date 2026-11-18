@@ -1,14 +1,14 @@
 name: mcp-nas
 
 services:
-  # Único componente con acceso al socket de Docker. Solo permite GET sobre
-  # contenedores, imágenes y redes (POST=0): no se puede parar ni crear nada.
+  # Only component with access to the Docker socket. It only allows GET on
+  # containers, images and networks (POST=0): nothing can be stopped or created.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.4.1
     container_name: mcp-nas-docker-proxy
     restart: unless-stopped
-    # HAProxy 3.x necesita más de 1024 descriptores; en ADM el límite por defecto
-    # es 1024 y el worker no arranca ("Cannot raise FD limit").
+    # HAProxy 3.x needs more than 1024 file descriptors; on ADM the default limit
+    # is 1024 and the worker fails to start ("Cannot raise FD limit").
     ulimits:
       nofile:
         soft: 65536
@@ -35,7 +35,7 @@ services:
     tmpfs: [/tmp]
     depends_on: [docker-socket-proxy]
     environment:
-      MCP_TOKEN: ${MCP_TOKEN:?define MCP_TOKEN en .env}
+      MCP_TOKEN: ${MCP_TOKEN:?set MCP_TOKEN in .env}
       MCP_PORT: "8088"
       DOCKER_HOST: http://docker-socket-proxy:2375
       NAS_CONF: /host/nas.conf
@@ -45,10 +45,10 @@ services:
       MD_LABELS: ${MD_LABELS:-}
       NAS_NOTES: ${NAS_NOTES:-}
     volumes:
-      # Datos expuestos (solo lectura, solo nombres y metadatos).
+      # Exposed data (read-only, names and metadata only).
       - /archive1:/archive1:ro
       - /archive2:/archive2:ro
-      # Carpeta vacía solo para medir el uso de volume1 (statvfs).
+      # Empty folder used only to measure volume1 usage (statvfs).
       - ${DOCKER_ROOT:-/volume1/Docker}/mcp-nas/vol1:/mnt/volume1:ro
       - /etc/nas.conf:/host/nas.conf:ro
     healthcheck:
@@ -59,16 +59,16 @@ services:
       start_period: 10s
     networks:
       - socket
-      - proxy   # NPM publica el MCP por nombre de contenedor
-    # Por defecto solo escucha en localhost del host. Para usarlo desde otro
-    # equipo, pon en .env la IP LAN (o de Tailscale) del NAS en MCP_BIND_IP.
-    # Nunca 0.0.0.0 ni la IP pública.
+      - proxy   # NPM publishes the MCP by container name
+    # By default it only listens on the host's localhost. To use it from another
+    # machine, set the NAS LAN (or Tailscale) IP in MCP_BIND_IP in .env.
+    # Never 0.0.0.0 or the public IP.
     ports:
       - "${MCP_BIND_IP:-127.0.0.1}:8088:8088"
 
 networks:
   socket:
-    internal: true   # el proxy del socket no necesita salida a internet
+    internal: true   # the socket proxy does not need internet access
   proxy:
     external: true
     name: proxy

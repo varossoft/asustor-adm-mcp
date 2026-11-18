@@ -7,7 +7,7 @@ import pytest
 
 from adm_mcp import core
 
-# Salida real de /proc/mdstat de un AS5402T con un solo NVMe (RAID1 degradado).
+# Real /proc/mdstat output from an AS5402T with a single NVMe (degraded RAID1).
 MDSTAT_DEGRADED = """Personalities : [linear] [raid0] [raid1] [raid10] [raid6] [raid5] [raid4]
 md1 : active raid1 nvme0n1p4[0]
       972173312 blocks super 1.2 [2/1] [U_]
@@ -30,11 +30,11 @@ MDSTAT_REBUILD = """md1 : active raid1 nvme1n1p4[2] nvme0n1p4[0]
 @pytest.fixture(autouse=True)
 def _cfg(tmp_path):
     (tmp_path / "data" / "docs").mkdir(parents=True)
-    (tmp_path / "data" / "docs" / "Factura Mercadona.pdf").write_text("x")
+    (tmp_path / "data" / "docs" / "Invoice Acme.pdf").write_text("x")
     (tmp_path / "data" / "#Recycle").mkdir()
-    (tmp_path / "data" / "#Recycle" / "factura borrada.pdf").write_text("x")
+    (tmp_path / "data" / "#Recycle" / "deleted invoice.pdf").write_text("x")
     (tmp_path / "outside").mkdir()
-    (tmp_path / "outside" / "secreto.txt").write_text("x")
+    (tmp_path / "outside" / "secret.txt").write_text("x")
     os.symlink(tmp_path / "outside", tmp_path / "data" / "escape")
     core.cfg.file_roots = [str(tmp_path / "data")]
     core.cfg.md_watch = {"md1"}
@@ -64,7 +64,7 @@ def test_mdstat_rebuild_progress():
 def test_safe_path_blocks_traversal_and_symlink_escape(tmp_path):
     root = str(tmp_path / "data")
     assert core.safe_path(root + "/docs").endswith("docs")
-    for bad in ("", "docs", "/etc/passwd", root + "/../outside", root + "/escape/secreto.txt"):
+    for bad in ("", "docs", "/etc/passwd", root + "/../outside", root + "/escape/secret.txt"):
         with pytest.raises(ValueError):
             core.safe_path(bad)
 
@@ -76,8 +76,8 @@ def test_list_files_hides_recycle(tmp_path):
 
 
 def test_search_files_name_only_and_skips_recycle():
-    r = core.search_files("factura")
-    assert r["count"] == 1 and r["results"][0].endswith("Factura Mercadona.pdf")
+    r = core.search_files("invoice")
+    assert r["count"] == 1 and r["results"][0].endswith("Invoice Acme.pdf")
 
 
 def test_search_files_escapes_glob_chars():
@@ -103,9 +103,9 @@ def _frame(stream: int, payload: bytes) -> bytes:
 
 
 def test_demux_and_raw_logs():
-    framed = _frame(1, b"hola\n") + _frame(2, b"error\n")
-    assert core.demux_docker_logs(framed) == "hola\nerror\n"
-    assert core.demux_docker_logs(b"texto plano tty\n") == "texto plano tty\n"
+    framed = _frame(1, b"hello\n") + _frame(2, b"error\n")
+    assert core.demux_docker_logs(framed) == "hello\nerror\n"
+    assert core.demux_docker_logs(b"plain tty text\n") == "plain tty text\n"
 
 
 def test_redact():
@@ -138,17 +138,17 @@ def test_docker_ps_and_projects():
 
 
 def test_docker_inspect_hides_env_values():
-    body = {"Name": "/n8n", "Config": {"Image": "n8n", "Env": ["DB_PASSWORD=supersecreto", "TZ=UTC"]},
+    body = {"Name": "/n8n", "Config": {"Image": "n8n", "Env": ["DB_PASSWORD=supersecret", "TZ=UTC"]},
             "State": {"Status": "running"}, "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
             "NetworkSettings": {"Networks": {"proxy": {}}}, "Mounts": []}
     _mock_docker(lambda req: httpx.Response(200, json=body))
     r = core.docker_inspect("n8n")
     assert r["env_names"] == ["DB_PASSWORD", "TZ"]
-    assert "supersecreto" not in json.dumps(r)
+    assert "supersecret" not in json.dumps(r)
 
 
 def test_docker_logs_redacts_and_truncates():
-    payload = _frame(1, b"token=abc123 arranque\n" + b"x" * 100)
+    payload = _frame(1, b"token=abc123 startup\n" + b"x" * 100)
     _mock_docker(lambda req: httpx.Response(200, content=payload))
     core.cfg.max_log_chars = 50
     r = core.docker_logs("n8n", lines=10)
@@ -160,7 +160,7 @@ def test_docker_logs_redacts_and_truncates():
 
 def test_docker_proxy_403_message():
     _mock_docker(lambda req: httpx.Response(403))
-    with pytest.raises(RuntimeError, match="rechaza"):
+    with pytest.raises(RuntimeError, match="rejects"):
         core.docker_images()
 
 
@@ -191,10 +191,10 @@ def _fake_sysfs(tmp_path):
     (sda / "size").write_text("11721045168\n")
     (sda / "queue" / "rotational").write_text("1\n")
     (sda / "device" / "model").write_text("ST6000VN006-2ZM1\n")
-    # Página VPD 0x80: cabecera de 4 bytes (el último es la longitud) + serie ASCII.
+    # VPD page 0x80: 4-byte header (the last byte is the length) + ASCII serial.
     (sda / "device" / "vpd_pg80").write_bytes(b"\x00\x80\x00\x08" + b"ZXA12345" + b"\x00" * 8)
 
-    (root / "md1").mkdir()          # no es un disco físico: debe ignorarse
+    (root / "md1").mkdir()          # not a physical disk: must be ignored
     (root / "loop0").mkdir()
     return root
 
@@ -216,7 +216,7 @@ def test_disk_serial_missing_is_none(tmp_path):
 
 
 def test_md_labels():
-    r = core.parse_mdstat(MDSTAT_DEGRADED, {"md1"}, {"md1": "volume1", "md0": "sistema"})
+    r = core.parse_mdstat(MDSTAT_DEGRADED, {"md1"}, {"md1": "volume1", "md0": "system"})
     by = {a["name"]: a for a in r["arrays"]}
-    assert by["md1"]["label"] == "volume1" and by["md0"]["label"] == "sistema"
+    assert by["md1"]["label"] == "volume1" and by["md0"]["label"] == "system"
     assert "label" not in by["md126"]

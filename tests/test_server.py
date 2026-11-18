@@ -11,19 +11,19 @@ def test_instructions_without_notes():
 
 
 def test_instructions_with_notes_and_newlines():
-    text = server.build_instructions("sda y sdb: datos sin RAID.\\nmd126 = swap")
-    assert "Notas del propietario" in text
-    assert "sda y sdb: datos sin RAID.\nmd126 = swap" in text
+    text = server.build_instructions("sda and sdb: data without RAID.\\nmd126 = swap")
+    assert "Owner notes about this NAS" in text
+    assert "sda and sdb: data without RAID.\nmd126 = swap" in text
 
 
 def test_client_receives_notes_and_all_tools_are_read_only():
     async def run():
-        mcp = server.build_mcp("sda y sdb no son miembros de ningun array")
+        mcp = server.build_mcp("sda and sdb are not members of any array")
         async with Client(mcp) as c:
             tools = await c.list_tools()
             return c.instructions, tools
 
     instructions, tools = asyncio.run(run())
-    assert "no son miembros de ningun array" in instructions
+    assert "are not members of any array" in instructions
     assert len(tools) == 12
     assert all(t.annotations.readOnlyHint for t in tools)

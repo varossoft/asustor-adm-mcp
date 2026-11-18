@@ -1,4 +1,4 @@
-"""Servidor MCP (streamable HTTP) con autenticación por bearer token."""
+"""MCP server (streamable HTTP) with bearer token authentication."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ TOOLS = [
 
 
 class BearerAuth:
-    """Middleware ASGI: exige `Authorization: Bearer <token>` (salvo /health)."""
+    """ASGI middleware: requires `Authorization: Bearer <token>` (except /health)."""
 
     def __init__(self, app, token: str):
         self.app = app
@@ -54,18 +54,18 @@ class BearerAuth:
 
 
 BASE_INSTRUCTIONS = (
-    "Consulta de solo lectura de un NAS Asustor: sistema, discos, RAID, "
-    "espacio, archivos (solo nombres) y estado de Docker. No modifica nada."
+    "Read-only queries for an Asustor NAS: system, disks, RAID, "
+    "space, files (names only) and Docker state. Modifies nothing."
 )
 
 
 def build_instructions(notes: str = "") -> str:
-    """Instrucciones del servidor + notas del propietario (NAS_NOTES) para que
-    el cliente conozca la arquitectura real y no tenga que suponerla."""
+    """Server instructions + owner notes (NAS_NOTES) so the client knows the
+    real architecture and does not have to guess it."""
     notes = notes.replace("\\n", "\n").strip()
     if not notes:
         return BASE_INSTRUCTIONS
-    return f"{BASE_INSTRUCTIONS}\n\nNotas del propietario sobre este NAS:\n{notes}"
+    return f"{BASE_INSTRUCTIONS}\n\nOwner notes about this NAS:\n{notes}"
 
 
 def build_mcp(notes: str = "") -> FastMCP:
@@ -82,7 +82,7 @@ def build_mcp(notes: str = "") -> FastMCP:
 
 def build_app(token: str, notes: str = ""):
     if len(token) < 24:
-        raise SystemExit("MCP_TOKEN debe tener al menos 24 caracteres (openssl rand -hex 32)")
+        raise SystemExit("MCP_TOKEN must be at least 24 characters long (openssl rand -hex 32)")
     mcp = build_mcp(notes)
     return BearerAuth(mcp.http_app(transport="streamable-http"), token)
 
@@ -92,7 +92,7 @@ def main() -> None:
     app = build_app(os.getenv("MCP_TOKEN", ""), os.getenv("NAS_NOTES", ""))
     host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", "8088"))
-    log.info("Escuchando en http://%s:%s/mcp", host, port)
+    log.info("Listening on http://%s:%s/mcp", host, port)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
