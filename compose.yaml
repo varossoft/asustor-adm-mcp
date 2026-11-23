@@ -23,6 +23,30 @@ services:
     networks:
       - socket
 
+  # OPTIONAL write proxy (only started with `--profile write`). Kept separate so
+  # the read-only proxy above stays at POST=0. WARNING: POST=1 with CONTAINERS=1
+  # also allows creating containers (= root on the host) to anyone who can reach
+  # this proxy. It sits on an internal network that only mcp-nas joins, and
+  # restart_container only issues POST /containers/<allowlisted-name>/restart.
+  # ALLOW_RESTARTS also covers stop/kill at proxy level; the MCP never sends them.
+  docker-socket-proxy-write:
+    profiles: ["write"]
+    image: tecnativa/docker-socket-proxy:v0.4.1
+    container_name: mcp-nas-docker-proxy-write
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    environment:
+      CONTAINERS: "1"
+      ALLOW_RESTARTS: "1"
+      POST: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-write
+
   mcp-nas:
     build: .
     image: mcp-nas:0.3.0
@@ -44,6 +68,10 @@ services:
       MD_WATCH: ${MD_WATCH:-md1}
       MD_LABELS: ${MD_LABELS:-}
       NAS_NOTES: ${NAS_NOTES:-}
+      # Write mode: OFF unless you set all three (and run --profile write).
+      ALLOW_WRITE: ${ALLOW_WRITE:-0}
+      WRITE_ALLOWLIST: ${WRITE_ALLOWLIST:-}
+      DOCKER_WRITE_HOST: ${DOCKER_WRITE_HOST:-}
     volumes:
       # Exposed data (read-only, names and metadata only).
       - /archive1:/archive1:ro
@@ -59,6 +87,7 @@ services:
       start_period: 10s
     networks:
       - socket
+      - socket-write
       - proxy   # NPM publishes the MCP by container name
     # By default it only listens on the host's localhost. To use it from another
     # machine, set the NAS LAN (or Tailscale) IP in MCP_BIND_IP in .env.
@@ -69,6 +98,8 @@ services:
 networks:
   socket:
     internal: true   # the socket proxy does not need internet access
+  socket-write:
+    internal: true   # only mcp-nas and the (optional) write proxy
   proxy:
     external: true
     name: proxy

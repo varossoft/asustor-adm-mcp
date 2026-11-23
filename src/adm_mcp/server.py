@@ -25,6 +25,15 @@ READ_ONLY = ToolAnnotations(
     openWorldHint=False,
 )
 
+# The only write action. Disruptive but not destructive: the container comes
+# back up. Same four explicit booleans as above.
+WRITE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+
 TOOLS = [
     core.get_system_info,
     core.list_disks,
@@ -38,6 +47,11 @@ TOOLS = [
     core.get_container_logs,
     core.list_images,
     core.list_networks,
+]
+
+# Registered only when ALLOW_WRITE=1 (see build_mcp).
+WRITE_TOOLS = [
+    core.restart_container,
 ]
 
 
@@ -67,20 +81,31 @@ BASE_INSTRUCTIONS = (
     "space, files (names only) and Docker state. Modifies nothing."
 )
 
+WRITE_INSTRUCTIONS = (
+    "Write mode is ON: the only action available is restart_container, limited "
+    "to the owner's allowlist. Everything else is read-only. Ask the person "
+    "before restarting anything, and never retry a failed restart in a loop."
+)
 
-def build_instructions(notes: str = "") -> str:
+
+def build_instructions(notes: str = "", write: bool = False) -> str:
     """Server instructions + owner notes (NAS_NOTES) so the client knows the
     real architecture and does not have to guess it."""
+    base = f"{BASE_INSTRUCTIONS}\n\n{WRITE_INSTRUCTIONS}" if write else BASE_INSTRUCTIONS
     notes = notes.replace("\\n", "\n").strip()
     if not notes:
-        return BASE_INSTRUCTIONS
-    return f"{BASE_INSTRUCTIONS}\n\nOwner notes about this NAS:\n{notes}"
+        return base
+    return f"{base}\n\nOwner notes about this NAS:\n{notes}"
 
 
-def build_mcp(notes: str = "") -> FastMCP:
-    mcp = FastMCP("asustor-adm-mcp", instructions=build_instructions(notes))
+def build_mcp(notes: str = "", write: bool | None = None) -> FastMCP:
+    write = core.cfg.write_enabled if write is None else write
+    mcp = FastMCP("asustor-adm-mcp", instructions=build_instructions(notes, write))
     for fn in TOOLS:
         mcp.tool(annotations=READ_ONLY)(fn)
+    if write:
+        for fn in WRITE_TOOLS:
+            mcp.tool(annotations=WRITE)(fn)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(request):
@@ -92,6 +117,7 @@ def build_mcp(notes: str = "") -> FastMCP:
 def build_app(token: str, notes: str = ""):
     if len(token) < 24:
         raise SystemExit("MCP_TOKEN must be at least 24 characters long (openssl rand -hex 32)")
+    core.validate_write_config()
     mcp = build_mcp(notes)
     return BearerAuth(mcp.http_app(transport="streamable-http"), token)
 

@@ -273,3 +273,109 @@ def test_storage_usage_reports_device_and_fstype(tmp_path, monkeypatch):
     core.cfg.storage_paths = {"archive1": str(tmp_path)}
     r = core.get_storage_usage()[0]
     assert r["device"] == "sda1" and r["fstype"] == "ext4"
+
+
+# --- write mode: restart_container ------------------------------------------
+def _enable_write(allow=("lazylibrarian", "sonarr")):
+    core.cfg.write_enabled = True
+    core.cfg.write_allowlist = frozenset(allow)
+    core.cfg.docker_write_host = "http://proxy-write:2375"
+    core.cfg.docker_host = "http://proxy:2375"
+
+
+def _reset_write():
+    core.cfg.write_enabled = False
+    core.cfg.write_allowlist = frozenset()
+    core.cfg.docker_write_host = ""
+
+
+def test_restart_disabled_by_default():
+    with pytest.raises(PermissionError, match="disabled"):
+        core.restart_container("lazylibrarian")
+
+
+def test_restart_refuses_container_outside_allowlist():
+    _enable_write()
+    try:
+        calls = []
+        core._transport = httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(204))
+        for name in ("adguardhome", "vaultwarden", "lazylibrarian2", "lazy"):
+            with pytest.raises(PermissionError, match="WRITE_ALLOWLIST"):
+                core.restart_container(name)
+        assert calls == []  # nothing ever reached Docker
+    finally:
+        _reset_write()
+
+
+@pytest.mark.parametrize("bad", ["", "../etc", "a/b", "x;y", "-rf", "a b"])
+def test_restart_rejects_invalid_names(bad):
+    _enable_write(allow=("ok",))
+    try:
+        with pytest.raises(ValueError):
+            core.restart_container(bad)
+    finally:
+        _reset_write()
+
+
+def test_restart_posts_only_restart_to_write_proxy():
+    _enable_write()
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(204)
+
+    try:
+        core._transport = httpx.MockTransport(handler)
+        out = core.restart_container("lazylibrarian")
+    finally:
+        _reset_write()
+    assert out == {"container": "lazylibrarian", "action": "restart", "status": "restarted"}
+    assert len(seen) == 1
+    req = seen[0]
+    assert req.method == "POST"
+    assert req.url.host == "proxy-write"  # never the read-only proxy
+    assert req.url.path == "/containers/lazylibrarian/restart"
+    assert dict(req.url.params) == {"t": "10"}
+
+
+def test_restart_maps_docker_errors():
+    _enable_write()
+    try:
+        core._transport = httpx.MockTransport(lambda r: httpx.Response(404))
+        with pytest.raises(RuntimeError, match="not found"):
+            core.restart_container("sonarr")
+        core._transport = httpx.MockTransport(lambda r: httpx.Response(403))
+        with pytest.raises(RuntimeError, match="403"):
+            core.restart_container("sonarr")
+        core._transport = httpx.MockTransport(lambda r: httpx.Response(500))
+        with pytest.raises(httpx.HTTPStatusError):
+            core.restart_container("sonarr")
+    finally:
+        _reset_write()
+
+
+def test_validate_write_config():
+    off = core.Config.from_env()
+    off.write_enabled = False
+    core.validate_write_config(off)  # nothing to validate when disabled
+
+    def mk(**kw):
+        c = core.Config.from_env()
+        c.write_enabled = True
+        c.docker_host = "http://proxy:2375"
+        c.docker_write_host = "http://proxy-write:2375"
+        c.write_allowlist = frozenset({"sonarr"})
+        for k, v in kw.items():
+            setattr(c, k, v)
+        return c
+
+    core.validate_write_config(mk())
+    with pytest.raises(ValueError, match="empty"):
+        core.validate_write_config(mk(write_allowlist=frozenset()))
+    with pytest.raises(ValueError, match="Invalid"):
+        core.validate_write_config(mk(write_allowlist=frozenset({"../x"})))
+    with pytest.raises(ValueError, match="DOCKER_WRITE_HOST is empty"):
+        core.validate_write_config(mk(docker_write_host=""))
+    with pytest.raises(ValueError, match="different"):
+        core.validate_write_config(mk(docker_write_host="http://proxy:2375"))
