@@ -1,8 +1,10 @@
-"""Read-only logic for an Asustor NAS (ADM).
+"""Logic for an Asustor NAS (ADM).
 
 No MCP dependencies: plain functions that read /proc, /sys, the file
 system (confined to allowed roots) and the Docker API through a
-docker-socket-proxy. Nothing writes or performs actions.
+docker-socket-proxy. Everything is read-only except `restart_container`,
+which is disabled by default (ALLOW_WRITE) and limited to an explicit
+allowlist of container names (WRITE_ALLOWLIST).
 """
 
 from __future__ import annotations
@@ -54,6 +56,9 @@ class Config:
     docker_host: str
     hidden_names: set[str]
     max_log_chars: int
+    write_enabled: bool = False
+    write_allowlist: frozenset[str] = frozenset()
+    docker_write_host: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -66,6 +71,9 @@ class Config:
             docker_host=os.getenv("DOCKER_HOST", "http://docker-socket-proxy:2375"),
             hidden_names=set(_csv("HIDDEN_NAMES", "#Recycle,@eaDir,@tmp")),
             max_log_chars=int(os.getenv("MAX_LOG_CHARS", "16000")),
+            write_enabled=os.getenv("ALLOW_WRITE", "0").strip().lower() in ("1", "true", "yes"),
+            write_allowlist=frozenset(_csv("WRITE_ALLOWLIST")),
+            docker_write_host=os.getenv("DOCKER_WRITE_HOST", "").strip(),
         )
 
 
@@ -567,3 +575,51 @@ def list_networks() -> list[dict]:
         }
         for n in sorted(items, key=lambda x: x.get("Name", ""))
     ]
+
+
+# --------------------------------------------------------------------------
+# Write actions (disabled by default; separate docker-socket-proxy)
+# --------------------------------------------------------------------------
+def validate_write_config(c: Config | None = None) -> None:
+    """Fail fast on an unsafe or incomplete write configuration."""
+    c = c or cfg
+    if not c.write_enabled:
+        return
+    if not c.write_allowlist:
+        raise ValueError("ALLOW_WRITE is set but WRITE_ALLOWLIST is empty")
+    bad = [n for n in c.write_allowlist if not NAME_RE.match(n)]
+    if bad:
+        raise ValueError(f"Invalid names in WRITE_ALLOWLIST: {sorted(bad)}")
+    if not c.docker_write_host:
+        raise ValueError("ALLOW_WRITE is set but DOCKER_WRITE_HOST is empty")
+    if c.docker_write_host == c.docker_host:
+        raise ValueError(
+            "DOCKER_WRITE_HOST must be a different docker-socket-proxy than "
+            "DOCKER_HOST so the read-only proxy keeps POST=0"
+        )
+
+
+def restart_container(name: str) -> dict:
+    """Restart ONE container from the owner's allowlist (WRITE_ALLOWLIST).
+
+    Only available when the server runs with ALLOW_WRITE=1. Any other
+    container is refused, regardless of what the Docker proxy would allow.
+    """
+    name = check_name(name)
+    if not cfg.write_enabled:
+        raise PermissionError("Write mode is disabled (ALLOW_WRITE is not set)")
+    if name not in cfg.write_allowlist:
+        raise PermissionError(f"'{name}' is not in WRITE_ALLOWLIST")
+    if not cfg.docker_write_host:
+        raise RuntimeError("DOCKER_WRITE_HOST is not configured")
+    try:
+        with httpx.Client(base_url=cfg.docker_write_host, timeout=40, transport=_transport) as c:
+            r = c.post(f"/containers/{name}/restart", params={"t": 10})
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Could not reach Docker ({cfg.docker_write_host}): {exc}") from exc
+    if r.status_code == 404:
+        raise RuntimeError(f"Container '{name}' not found")
+    if r.status_code == 403:
+        raise RuntimeError("The write docker-socket-proxy rejects this endpoint (403)")
+    r.raise_for_status()
+    return {"container": name, "action": "restart", "status": "restarted"}
