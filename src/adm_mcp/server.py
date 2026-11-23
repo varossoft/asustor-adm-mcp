@@ -8,13 +8,22 @@ import os
 
 import uvicorn
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from . import core
 
 log = logging.getLogger("asustor-adm-mcp")
 
-READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+# All four MCP hints, explicit booleans (required by e.g. the OpenAI directory).
+# Every tool only reads from the local NAS (/proc, /sys, allowed roots, and GET
+# requests to the docker-socket-proxy), so one shared constant fits all of them.
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
 
 TOOLS = [
     core.get_system_info,
